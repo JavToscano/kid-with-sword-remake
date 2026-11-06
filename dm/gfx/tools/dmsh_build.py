@@ -1398,6 +1398,7 @@ def finish(key, w, j, c1):
     try: src = raw_log_opt(key, j['stage'], src, res)
     except ValueError as e: return 'reflection failed', str(e)[:160], None
     src = dmsh_wide.wide_loads(src)   # storage words the translator split, read whole again (see dmsh_wide.py)
+    if not j.get('mesh_stage'): src = dmsh_wide.raw_fours(src)[0]   # raw reads against the kept entry in 64 bits, four adjacent words in one (see dmsh_wide.raw_fours)
     src = border_emu(src); open(msl, 'w').write(src)   # border colours Metal lacks (see border_emu)
     first, spill = [], 0
     mesh = j.get('mesh_stage')
