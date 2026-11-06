@@ -11232,7 +11232,7 @@ void ms_after(void) {
 // DM_NVN_FB_SNAP=0 none, all a fresh snapshot for every draw sampling an attachment of its pass (diagnostic); DM_NVN_FB_TILE=0 no tile reads
 static int g_fb_mode = -1;   // 0 none, 1 writers with reuse until a barrier, 2 every sampling draw, fresh
 static uint64_t g_fb_bar, g_fb_reuse, g_fb_split;   // game barriers so far (OP_BARRIER with bits); draws that reused a snapshot; passes ended before a write to an attachment an earlier draw read
-static uint64_t g_fb_pass = UINT64_MAX; static uint32_t g_fb_wmask, g_fb_rmask, g_fb_dread;   // the current Metal render pass: color attachments written so far, sampled directly; a draw has read its depth attachment (or could have: bindless)
+static uint64_t g_fb_pass = UINT64_MAX; static uint32_t g_fb_wmask, g_fb_rmask, g_fb_dread, g_fb_dwrite;   // the current Metal render pass: color attachments written so far, sampled directly; a draw has read its depth attachment (or could have: bindless); a draw has written it
 typedef struct { uint64_t ser, bar, sub, use; int lv, sl; __strong id<MTLTexture> snap; } fb_cache_t;   // use: when it was last taken or reused (g_fbc_use)
 static fb_cache_t g_fbc[8]; static uint64_t g_fbc_use;
 static int fb_mode(void) {
@@ -11240,7 +11240,7 @@ static int fb_mode(void) {
         if (g_fb_mode != 1) MLOG("same-pass feedback sampling snapshot: %s (DM_NVN_FB_SNAP)", g_fb_mode ? "a fresh one for every draw sampling an attachment of its pass" : "off"); }
     return g_fb_mode;
 }
-static inline void fb_pass_sync(void) { uint64_t p = g_stat_pass + !g_enc; if (p != g_fb_pass) { g_fb_pass = p; g_fb_wmask = g_fb_rmask = g_fb_dread = 0; } }
+static inline void fb_pass_sync(void) { uint64_t p = g_stat_pass + !g_enc; if (p != g_fb_pass) { g_fb_pass = p; g_fb_wmask = g_fb_rmask = g_fb_dread = g_fb_dwrite = 0; } }
 static inline int fb_shape(const fb_cache_t *e, MTLPixelFormat pf, NSUInteger w, NSUInteger h) { return e->snap && e->snap.pixelFormat == pf && e->snap.width == w && e->snap.height == h; }
 static inline int fb_live(const fb_cache_t *e) { return e->ser && e->bar == g_fb_bar && e->sub == g_sub_serial; }   // a later draw may still reuse it
 // The snapshot of an attachment's level and layer: the cached one (valid: *fresh = 0) or a texture to copy into (*fresh = 1; the entry is then valid from this barrier and submission on).
@@ -11373,7 +11373,18 @@ static void fb_prepare(NvProg *pr) {
     int dsw = R.rt.depth && ((S.ds.dt && S.ds.dw) || (S.ds.st && (S.st_wmask[0] || S.st_wmask[1]) && (S.ds.fail_f != NVN_STENCIL_OP_KEEP || S.ds.zfail_f != NVN_STENCIL_OP_KEEP || S.ds.zpass_f != NVN_STENCIL_OP_KEEP
         || S.ds.fail_b != NVN_STENCIL_OP_KEEP || S.ds.zfail_b != NVN_STENCIL_OP_KEEP || S.ds.zpass_b != NVN_STENCIL_OP_KEEP)));
     if (g_enc && dsw && g_fb_dread) { g_fb_split++; rp_end(); fb_pass_sync(); }   // the same for its depth and stencil (see rtc_on)
-    if (R.rt.depth && !g_fb_dread && (((fs->rf.pool || fs->rf.dyn) && !(S.ds.dt && S.ds.dw && fb_dself())) || (fs->rf.bindless && fb_texu_reads(fs, R.rt.depth->serial)))) g_fb_dread = 1;
+    // A draw that samples its depth attachment after an earlier draw of the pass wrote it would read what the tile has not stored (TBDR): flickering black blocks on depth-softened
+    // translucent surfaces (Ocarina of Time's Zora's Sapphire pedestal, Jabu-Jabu's insides, PR #1444's 349c8006). The pass ends first; a read through a texture pool alone does
+    // not end it (the pool may hold the depth texture only in principle). dread is recorded at the end, after any split, so the new pass knows it
+    uint32_t dread = 0;
+    if (R.rt.depth && !g_fb_dread) {
+        int self = S.ds.dt && S.ds.dw && fb_dself();
+        int sure = (fs->rf.dyn && !self) || (fs->rf.bindless && fb_texu_reads(fs, R.rt.depth->serial));
+        if (sure || (fs->rf.pool && !self)) {
+            if (g_enc && g_fb_dwrite && sure) { g_fb_split++; rp_end(); fb_pass_sync(); }
+            dread = 1;
+        }
+    }
     {   // Most draws sample no attachment of their pass: one look at the serials their fragment textures and images name (under one lock) settles it before the tile plan
         // and the per-binding work below, which only matter for a binding that names one (Breath of the Wild: about 1 draw in 15)
         uint64_t rs[9]; int nr = 0; for (int k = 0; k < R.rt.n && k < 8; k++) if (R.rt.color[k]) rs[nr++] = R.rt.color[k]->serial;
@@ -11386,7 +11397,7 @@ static void fb_prepare(NvProg *pr) {
             int tid = (int)((image ? S.img[1][b->reg] : tex_slot_h(S.tex[1], S.img[1], b->reg)) & 0xfffff); if (!tid || tid >= g_ntreg || !g_treg[tid].ok) continue;
             uint64_t ser = g_treg[tid].t.serial; for (int q = 0; q < nr; q++) hit |= rs[q] == ser; }
         os_unfair_lock_unlock(&g_rmu);
-        if (!hit) { g_fb_wmask |= wm; return; }
+        if (!hit) { g_fb_wmask |= wm; g_fb_dread |= dread; if (dsw) g_fb_dwrite = 1; return; }
     }
     uint64_t tile[4]; int ntile = fb_tile_plan(pr, wm, tile);
     for (int i = 0; i < fs->rf.nb && g_fb_n < 4; i++) {
@@ -11397,7 +11408,7 @@ static void fb_prepare(NvProg *pr) {
         int tid = (int)(handle & 0xfffff); if (!tid) continue;
         os_unfair_lock_lock(&g_rmu); uint64_t ser = tid < g_ntreg && g_treg[tid].ok ? g_treg[tid].t.serial : 0; os_unfair_lock_unlock(&g_rmu);
         if (!ser) continue;
-        if (R.rt.depth && R.rt.depth->serial == ser) g_fb_dread = 1;
+        if (R.rt.depth && R.rt.depth->serial == ser) { if (g_enc && g_fb_dwrite) { g_fb_split++; rp_end(); fb_pass_sync(); } dread = 1; }   // a binding of the depth attachment after a depth write: see above
         for (int k = 0; k < R.rt.n && k < 8 && g_fb_n < 4; k++) { if (!R.rt.color[k] || R.rt.color[k]->serial != ser) continue;
             if (!image && (tile[b->reg >> 6] >> (b->reg & 63) & 1)) { PD("N %llu same-pass feedback sampling: slot %d reads attachment %d ser=%llu from the tile", g_stat_pass + !g_enc, b->reg, k, (unsigned long long)ser); continue; }   // fb_tile_plan
             uint64_t aser; int lv, sl; rt_sub(&R.rt, k, &aser, &lv, &sl);
@@ -11471,7 +11482,7 @@ static void fb_prepare(NvProg *pr) {
                      (unsigned long long)atomic_load(&g_cur_frame), g_stat_pass + !g_enc, fs->key, b->reg, k, (unsigned long long)ser, (unsigned long)w, (unsigned long)h, (unsigned long)base.pixelFormat);
             PD("N %llu same-pass feedback sampling: attachment %d ser=%llu level %d layer %d copied into a snapshot; this draw samples the snapshot", g_stat_pass + !g_enc, k, (unsigned long long)ser, lv, sl);
         } }
-    g_fb_wmask |= wm;
+    g_fb_wmask |= wm; g_fb_dread |= dread; if (dsw) g_fb_dwrite = 1;
     if (g_fb_n) { g_fb_seq = g_draw_seq; args_dirty_all(); g_fb_rebind = 1; }
     if (ntile) { g_fb_tseq = g_draw_seq; g_fb_tile_draws++;
         if (g_fb_tile_draws == 1 || g_fb_tile_draws == 1000 || g_fb_tile_draws % 100000 == 0)

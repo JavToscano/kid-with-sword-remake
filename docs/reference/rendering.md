@@ -549,6 +549,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Check:** `make -C dm/gfx/tests GAME=<id> check_t_feedback`.
 - **Found on:** The Legend of Zelda: Ocarina of Time (`0400486024DEC000`, profile in PR #1299), issue #1385: the reader wrote depth itself in all but 9 of 67,739 splits in Kokiri Forest, from 32 shaders, 91% of them on one 128x128 target, in bursts of up to 600 passes a frame. On an M5 Pro at 1280x720, A/B over 6 paired phases: 183 to 112 passes a frame, attachments 286 / 316 to 244 / 273 MB, GPU p50 20.3 to 16.5 ms, frame p50 20.7 to 16.8 ms.
 
+### Depth sampled after a draw of the same pass wrote it
+
+- **Symptom:** flickering black blocks on translucent surfaces softened by the scene's depth, the same place in every frame they show.
+- **Cause:** `fb_prepare` ended a pass when a draw wrote depth after an earlier draw of the pass read it, but not the other way round. On a tile-based GPU, a draw that samples the depth attachment after an earlier draw of its pass wrote it reads what the tile has not stored yet.
+- **Fix:** `fb_prepare` (`nvn_mtl.m`) keeps `g_fb_dwrite` for the pass and ends it before such a draw: one with the depth attachment in a texture slot, a TEXU handle that names it, or a dynamic table. A read through a texture pool alone does not end the pass (the pool may hold the depth texture only in principle, see [Pool shaders that write depth taken as depth readers](#pool-shaders-that-write-depth-taken-as-depth-readers)). The read is recorded after the split, so it counts in the pass the draw opens.
+- **Check:** `make -C dm/gfx/tests GAME=<id> check_t_feedback` (`reuse_case`: a draw reading depth after a write of it in the same pass ends the pass; it fails without the fix).
+- **Found on:** The Legend of Zelda: Ocarina of Time (`0400486024DEC000`), PR #1444's 349c8006: the Zora's Sapphire pedestal and Jabu-Jabu's insides. Not seen in game on this tree.
+
 ### Mip-chain pass sampling the level it renders
 
 - **Symptom:** NaN texels in the upper levels of a texture the game fills level by level (each level drawn from the one above), and from there NaN wherever the texture is read: black speckles in whole 2×2 quads, white blotches once bloom spreads them, and a dark frame from the eye adaptation.
