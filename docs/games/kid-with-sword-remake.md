@@ -36,6 +36,7 @@ Every iPhone build is numbered; its file is `OcarinaOfTime-V<n>.ipa` (the first 
 | V5 | `OcarinaOfTime-V5.ipa`, 3.0 GB, split | The launcher's **Console mode** picks the resolution: handheld 1280 × 720, docked 1951 × 1098 (the game's nearest size to 1080p; see [Resolution](#resolution)). The black world with the MetalFX upscaler at other resolutions fixed | Mac: both modes render at those sizes, no crash. Not yet on the iPhone |
 | V6 | `OcarinaOfTime-V6.ipa`, 3.2 GB, split | Upstream and fork performance work (see [Where the code comes from](#where-the-code-comes-from)): draws that write depth no longer end render passes, raw-memory lookups start from the entry they chose last, back-to-back compute dispatches run side by side, fewer render-pass splits for grass; crash fixes (the ocarina, iOS 26.0 with Metal 4, later areas' memory maps); a fixed frame rate (the launcher's 30 or 60, no automatic step to 30, no heat cap) | Mac (MacBook Air M5, 720p handheld, Kokiri Forest): GPU p50 18-19 → 13.6-16 ms, frame p50 16.6-17.0 ms, 0 dropped frames in 4 of 5 windows. Not yet on the iPhone |
 | V7 | `OcarinaOfTime-V7.ipa`, 3.2 GB, split | An 8 GB alias region (`mem_alias 0x200000000`, `mem_reserve 0x468000000`) for the game's streaming allocator: with 2.38 GB the loader retried what did not fit and the `OptimizeChangeBanc` thread spun a whole core, heating the iPhone into thermal state "serious" within a minute | Mac: the thread sleeps, process CPU 308% → 168%. iPhone: V6 held 60 for about 20 s of gameplay, then iOS moved the game to its efficiency cores; V7 not yet on the iPhone |
+| V8 | `OcarinaOfTime-V8.ipa`, 3.2 GB, split | Four submit-thread savings from Xipzer (5-30% less submit CPU on the Mac), the GPU architecture in the log (`applegpu_g19p` on the iPhone 18 Pro) and the **Forest** touch-control theme (launcher setting `Touch controls style`) | iPhone 18 Pro: 60 fps for about 45 s, then 33-46 fps once iOS lowers the CPU clock at thermal state "fair" (GPU 12-14 ms a frame, so the limit is the CPU clock, not the GPU) |
 
 ## What you need
 
@@ -80,6 +81,18 @@ Every iPhone build is numbered; its file is `OcarinaOfTime-V<n>.ipa` (the first 
    | The Metal 4 specialization descriptor owned once | upstream `88c7e03f` | No crash before the first frame on iOS 26.0 |
    | Damaged RomFS files served as a substitute | [#1530](https://github.com/seedds/nxnative/pull/1530) | For dumps with three damaged textures (this one has none) |
    | `mem_map_limit on` | fork `9f6ad246` | No crash entering Hyrule Castle, Kakariko Village and Death Mountain (reported in #1444) |
+
+   Since V9, from the **oot2** branch of [nxnative-penis6](https://git.eden-emu.dev/penis6/nxnative-penis6/src/branch/oot2) (the Mighty Green Kokiri Kid fork's base, 9 newer commits):
+
+   | Change | Source | Effect |
+   |---|---|---|
+   | An encoder's end barrier flushes to the device only | oot2 `475d7b87` | Fewer full barriers between the game's compute encoders |
+   | Resolution families take every GPU-written compressible 2D image | oot2 `b8838d3b` | More render targets share one resolution family |
+   | A draw that samples its depth attachment after an earlier draw wrote it ends the pass first | oot2 `d8bca8ae` | No black blocks where an effect reads depth |
+   | Raw global memory lookups keep the last entry's range and delta in private words | oot2 `6951110c`, merged into this tree's table layout | A read inside the kept entry needs no read of the pool table (skinned vertex shaders: 759 such reads a vertex, about 7 ms of a frame in Hyrule Castle Town, oot2's measurement) |
+   | Four adjacent raw reads become one 16-byte load (`dmsh_wide.raw_fours`) | oot2 `eab8cca5`, with this tree's hint tag (the chunk, not chunk + 1) | Hyrule Castle Town 17.7 → 15.5-16.0 ms of GPU a frame (oot2's measurement) |
+
+   Shader chain `8c88ed8cda05`. Not taken from oot2: `f09e6c8c` (needs #1453's render-target heap) and `1837defd` (the texture CPU rewrite, built on oot2's NDVE direct draws).
 
    Not taken: [#1468](https://github.com/seedds/nxnative/pull/1468) (needs upstream main's submission timing), the fork's raw-load quads (about 0.4 ms, another translator change). Upstream main itself was not merged: its Ocarina of Time profile is another line (docked by default, other shader groups, no texture release or MetalFX chain), so the changes above were taken one by one.
 
