@@ -151,6 +151,17 @@ if [ "$GFXAPI" = nvn ] && [ -n "$GPUS" ] && [ "$GPUS" != none ] && [ -f "$GD/sha
     t "[RED] pipeline archive: pso_offline.py failed (its output is above); the app is built without one and the device builds its pipeline bases on its first start (DM_PSO_GPUS=none skips this step)"
     rm -rf "$PSO"; PSO=
   fi
+  # DM_PSO_OUTSIDE=1 (the default): the archives stay out of the app, beside the IPA in <IPA name>-pipelines/, and the app carries the small tables and outside.tsv (each archive's
+  # name and size). Sideloading tools sign every Mach-O in the bundle; an archive is one (MH_GPU_EXECUTE) and they fail on it ("Failed to Sign .../pso/applegpu_g19p.mtl4a", an
+  # iPhone 18 Pro, 4.3 GB). The player copies the file into the app's Documents once (main.m DM_PSO_DOCS, nvn_mtl.m pso_bundle_open). DM_PSO_OUTSIDE=0 bundles them as before
+  if [ -n "$PSO" ] && [ "${DM_PSO_OUTSIDE:-1}" != 0 ]; then
+    PA=$W/build/ios/pso/app; PX="${OUT_IPA%.ipa}-pipelines"; rm -rf "$PA" "$PX"; mkdir -p "$PA" "$PX" || die "pipeline archive folders"
+    for f in "$PSO"/*; do case $f in
+      *.mtl4a) cp -c "$f" "$PX/" 2>/dev/null || cp "$f" "$PX/" || die "copy $f"; printf '%s\t%s\n' "$(basename "$f")" "$(stat -f %z "$f")" >> "$PA/outside.tsv" ;;
+      *) cp "$f" "$PA/" || die "copy $f" ;;
+    esac; done
+    PSO=$PA; t "pipeline archive kept outside the app (sideloaders sign every Mach-O): copy $(ls "$PX" | tr '\n' ' ')from $PX into the app's Documents folder"
+  fi
 else [ "$GFXAPI" != nvn ] || t "no pipeline archive ($([ -n "${DM_PSO_GPUS+set}" ] && echo "DM_PSO_GPUS=${GPUS:-empty}" || echo "the profile does not set pso_mtl4 on; DM_PSO_GPUS=g18p builds one")$([ -f "$GD/shader_pairs.tsv" ] || echo ', no shader_pairs.tsv'))"; fi
 # The packed language (DMLanguage) is the Game language row's default, which settings.py makes the game's first language when it lacks DM_LANG: the screen and DM_LAUNCHER=0 then agree
 LD=$(python3 -c 'import json, sys; print(next((s["default"] for s in json.load(open(sys.argv[1]))["settings"] if s["env"] == "DM_LANG"), ""))' $LJ) || die "launcher settings ($LJ)"

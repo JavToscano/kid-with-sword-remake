@@ -7561,6 +7561,35 @@ static void pso_bundle_open(NSMutableArray<id<MTL4Archive>> *archp) {
     if (!e || !*e || !strcmp(e, "off")) return;
     NSString *dir = @(e), *gpu = [(id)g_dev respondsToSelector:@selector(architecture)] ? g_dev.architecture.name : nil;
     NSString *p = gpu ? [dir stringByAppendingPathComponent:[gpu stringByAppendingPathExtension:@"mtl4a"]] : nil;
+    // An archive kept outside the signed app (build_ipa.sh DM_PSO_OUTSIDE): sideloading tools sign every Mach-O in the bundle, and an archive is one (MH_GPU_EXECUTE), so they
+    // fail on it (or would change its bytes). The app then carries outside.tsv, each archive's name and exact size, and the player copies the file into Documents once, as
+    // romfs.img. Only a file of that size is used (any letter case: a copy keeps its source's name), so a copy cut off partway or one from another build is not
+    const char *docs = getenv("DM_PSO_DOCS");
+    if (p && ![NSFileManager.defaultManager fileExistsAtPath:p] && docs && *docs) {
+        NSString *want = [gpu stringByAppendingPathExtension:@"mtl4a"], *tsv = [NSString stringWithContentsOfFile:[dir stringByAppendingPathComponent:@"outside.tsv"] encoding:NSUTF8StringEncoding error:nil];
+        unsigned long long size = 0;
+        for (NSString *ln in [tsv componentsSeparatedByString:@"\n"]) {
+            NSArray<NSString *> *c = [ln componentsSeparatedByString:@"\t"];
+            if (c.count >= 2 && [c[0] isEqualToString:want]) size = strtoull(c[1].UTF8String, NULL, 10);
+        }
+        if (size) {
+            NSString *found = nil, *seen = nil;
+            for (NSString *sub in @[@"", @"pso"]) {
+                NSString *d = [@(docs) stringByAppendingPathComponent:sub];
+                for (NSString *n in [NSFileManager.defaultManager contentsOfDirectoryAtPath:d error:nil] ?: @[]) {
+                    if ([n caseInsensitiveCompare:want] != NSOrderedSame) continue;
+                    NSString *q = [d stringByAppendingPathComponent:n];
+                    unsigned long long have = [[NSFileManager.defaultManager attributesOfItemAtPath:q error:nil] fileSize];
+                    if (have == size) { found = q; break; }
+                    seen = [NSString stringWithFormat:@"%@ (%llu bytes)", q, have];
+                }
+                if (found) break;
+            }
+            if (found) p = found;
+            else MLOG("[RED] pipeline archive kept outside the app: Documents has no %s of %llu bytes%s%s: copy it from beside the IPA into the app's Documents folder; until then the bases are built on the device",
+                      want.UTF8String, size, seen ? ", only " : "", seen ? seen.UTF8String : "");
+        }
+    }
     if (!p || ![NSFileManager.defaultManager fileExistsAtPath:p]) {
         NSArray<NSString *> *have = [[NSFileManager.defaultManager contentsOfDirectoryAtPath:dir error:nil] filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"self ENDSWITH '.mtl4a'"]];
         MLOG("pipeline archive bundled with the app: none for this GPU (%s; %s has %s): the bases are built on the device", gpu ? gpu.UTF8String : "architecture unknown", e,
