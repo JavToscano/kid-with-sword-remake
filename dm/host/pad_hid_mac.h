@@ -1,7 +1,7 @@
 // Mac: raw HID gamepads that GameController does not list (pad_hid.h, GitHub issue #637), read on the main run loop alongside front_mac.m's GameController players.
 // Each device takes a player slot as a GameController controller does; front_mac.m defines the slot side (hidpad_attach / hidpad_detach / hidpad_read).
 // Skipped, so no controller is read twice: GameController's synthetic devices, and every device GameController says it will list itself (+[GCController supportsHIDDevice:]:
-// Xbox, PlayStation, Switch and MFi pads of any vendor). DM_HID_PADS=0 turns this off.
+// Xbox, PlayStation, Switch and MFi pads of any vendor), unless GameController lists no controller three seconds after the device appeared (hidpad_found). DM_HID_PADS=0 turns this off.
 #pragma once
 #import <IOKit/hid/IOHIDManager.h>
 #import <GameController/GameController.h>
@@ -36,11 +36,14 @@ static void hidpad_value(void *ctx, IOReturn result, void *sender, IOHIDValueRef
     }
     hidpad_read(d);
 }
-static void hidpad_found(void *ctx, IOReturn result, void *sender, IOHIDDeviceRef hid) {
-    (void)ctx; (void)sender;
-    if (result != kIOReturnSuccess || IOHIDDeviceGetProperty(hid, CFSTR(kIOHIDGCSyntheticDeviceKey)) == kCFBooleanTrue) return;
-    for (hid_pad *d = g_hidpads; d; d = d->next) if (d->hid == hid) return;
-    if ([GCController supportsHIDDevice:hid]) return;   // front_mac.m reads it through its GCController (once per device: the call is not cheap)
+// A device GameController says it will list, kept until the wait below is over (the main run loop only: found, removed and the timer all run there)
+static NSMutableSet<NSValue *> *g_hidpad_pending;
+// The GameController side's controllers: those with an extended gamepad profile, which is what front_mac.m reads
+static int hidpad_gc_listed(void) {
+    int n = 0; for (GCController *c in GCController.controllers) if (c.extendedGamepad) n++;
+    return n;
+}
+static void hidpad_adopt(IOHIDDeviceRef hid) {
     NSNumber *vendor = (__bridge NSNumber *)IOHIDDeviceGetProperty(hid, CFSTR(kIOHIDVendorIDKey)), *product = (__bridge NSNumber *)IOHIDDeviceGetProperty(hid, CFSTR(kIOHIDProductIDKey));
     int vid = vendor.intValue, pid = product.intValue;
     hid_pad *d = calloc(1, sizeof *d); if (!d) { LOG("[RED] HID gamepad: cannot allocate device state"); return; }
@@ -56,8 +59,29 @@ static void hidpad_found(void *ctx, IOReturn result, void *sender, IOHIDDeviceRe
     if (vid != PAD_HID_DEFAULT_VENDOR && !getenv("DM_HID_MAP"))
         LOG("controller '%s' (HID, %04x:%04x): buttons use 8BitDo's numbering; if they are in the wrong places, DM_HID_LOG=1 logs each button's number for a DM_HID_MAP", d->name, vid, pid);
 }
+static void hidpad_found(void *ctx, IOReturn result, void *sender, IOHIDDeviceRef hid) {
+    (void)ctx; (void)sender;
+    if (result != kIOReturnSuccess || IOHIDDeviceGetProperty(hid, CFSTR(kIOHIDGCSyntheticDeviceKey)) == kCFBooleanTrue) return;
+    for (hid_pad *d = g_hidpads; d; d = d->next) if (d->hid == hid) return;
+    if (![GCController supportsHIDDevice:hid]) { hidpad_adopt(hid); return; }   // GameController will not list it: read it here
+    // GameController says it will list it (once per device: the call is not cheap), and front_mac.m then reads it through its GCController. Open: some pads it claims
+    // it never lists (a GameSir G7 Pro over Bluetooth: a composite keyboard / mouse / consumer / gamepad device, supportsHIDDevice 1, no controller, so no input at all).
+    // Workaround, cause in GameController not known: when no controller has been listed three seconds later, the device is read here as any other
+    if (!g_hidpad_pending) g_hidpad_pending = [NSMutableSet set];
+    NSValue *key = [NSValue valueWithPointer:hid];
+    [g_hidpad_pending addObject:key];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+        if (![g_hidpad_pending containsObject:key]) return;   // removed meanwhile
+        [g_hidpad_pending removeObject:key];
+        if (hidpad_gc_listed() > 0) return;   // GameController lists a controller: it is the pad (with several pads, one claimed but never listed stays unread)
+        LOG("HID gamepad: GameController lists no controller 3 s after '%s' appeared, reading it directly",
+            ((__bridge NSString *)IOHIDDeviceGetProperty(hid, CFSTR(kIOHIDProductKey))).UTF8String ?: "HID gamepad");
+        hidpad_adopt(hid);
+    });
+}
 static void hidpad_removed(void *ctx, IOReturn result, void *sender, IOHIDDeviceRef hid) {
     (void)ctx; (void)result; (void)sender;
+    [g_hidpad_pending removeObject:[NSValue valueWithPointer:hid]];
     hid_pad **link = &g_hidpads;
     while (*link && (*link)->hid != hid) link = &(*link)->next;
     if (!*link) return;

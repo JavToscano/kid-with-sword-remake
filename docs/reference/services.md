@@ -425,6 +425,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Check:** with the pointer over the game, a controller button or the keyboard hides it; moving the mouse shows it; over the title bar, or with another app active, it stays.
 - **Found on:** every game on the Mac (general); [PR #584](https://github.com/seedds/nxnative/pull/584).
 
+### A pad GameController claims but never lists gets no input on the Mac
+
+- **Symptom:** on the Mac, a Bluetooth gamepad that macOS lists as connected does nothing in the game, and the log has no `controller '<name>' connected` line, with or without `(HID)`. The GameSir G7 Pro is one (vendor 0x3537, product 0x1022): a composite device whose HID descriptor has keyboard, mouse, consumer-control and gamepad collections. Wired over USB it is a vendor-specific XInput device (device class 255) that macOS makes no HID device of at all, so there it cannot be read by either path.
+- **Cause:** `+[GCController supportsHIDDevice:]` returns 1 for the pad, so the raw HID reader (`hidpad_found`) skipped it to avoid reading a controller twice, and GameController then never listed a controller for it (`GCController.controllers` stays empty). The reason GameController claims it and does not list it is not known (open).
+- **Fix (a workaround; the cause lies in GameController):** `pad_hid_mac.h` keeps a claimed device pending for 3 s; if `GCController.controllers` lists no controller with an extended gamepad by then, it reads the device itself as any other raw HID pad (log: `HID gamepad: GameController lists no controller 3 s after '<name>' appeared, reading it directly`). A device removed meanwhile is dropped from the pending set. A pad that GameController does list is untouched. With several pads, one claimed but never listed next to a listed one stays unread, because the check counts controllers, not devices.
+- **Check:** with the G7 Pro on Bluetooth, the log shows the line above and `controller 'GameSir-G7 Pro' (HID) connected: player 1`; `DM_HID_LOG=1` logs each button's usage. The raw reader needs Input Monitoring for the app that starts the host (Terminal), or `IOHIDManagerOpen` fails with `0xe00002e2` and the log says `[RED] HID gamepads: cannot open HID`. The default button map is 8BitDo's by position (Xbox-labelled pads have A and B swapped against the printed letters, as for any pad on that map). Tested by hand on the Mac with Ocarina of Time: the buttons, the sticks and the rest of the pad work; no other pad was tried.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) (general: any game on the Mac with such a pad).
+
 ### Mac display sleep during controller play
 
 - **Symptom:** the Mac dims or turns off its display and can reach the lock screen while the player is using a controller, in a window or in fullscreen.
